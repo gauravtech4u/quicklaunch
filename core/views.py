@@ -14,55 +14,93 @@ from django.http import Http404
 from voting.models import Vote
 from django.db.models import Count
 
-def generic_list(request,app,model_name,category=None):
-    model = get_model(app,model_name)
-    try:
-        if category and not category.__contains__('all-'):
-            generic_list=model._default_manager.filter(category__slug=category).order_by('?')
+class WrapperView(object):
+    
+    """
+    This is a wrapper view that can be inherited by any class for creating
+    class based generic views .
+    
+    __new__() is a static function that is used create a new instance if class
+    
+    handle_request() check if request is of type GET or POST and call appropriate handle
+    """
+    
+    def __new__(cls, request, *args, **kwargs):
+        self = object.__new__(cls)
+        self.args = args
+        self.kwargs = kwargs
+        self.request = request
+        self.current=kwargs['app']
+        self.limit=10
+        self.state='all'
+        self.app=kwargs['app']
+        self.model_name=kwargs['model_name']
+        self.__init__()
+        return self.handle_request()
+
+    def __init__(self):
+        pass
+
+class WrapperListingView(WrapperView):
+    """
+    This class can be used by any class to show basic listing on templates
+    This class can be overriden by any class to change the behavior(applying various filters)
+    """
+    
+    def handle_request(self):
+        self.template=self.app+"/"+self.model_name.lower()+"_list.html"
+        self.category_list=CategoryDefault._default_manager.filter(parent=None,type=self.model_name)
+        self.model = get_model(self.app,self.model_name)        
+        if self.kwargs.get('category'):
+            return self.handle_category_list(*self.args, **self.kwargs)
         else:
-            generic_list=model._default_manager.all()
-            category  = 'all'
-    except:
-        raise Http404
-    current=app
-    state = 'all'
-    limit=10
-    if request.GET.get('limit'):
-        limit=int(request.GET.get('limit'))
-    paginator = Paginator(generic_list, limit)          # Called the django default Paginator       
-    try:
-       page = paginator.page(request.GET.get('page', 1))
-    except InvalidPage:
-       raise Http404
-    startPage = max(page.number - 2, 1)
-    if startPage <= 2: startPage = 1
-    endPage = page.number + 2 + 1
-    if endPage >= paginator.num_pages - 1: endPage = paginator.num_pages + 1
-    page_numbers = [n for n in range(startPage, endPage) if n > 0 and n <= paginator.num_pages]
-    pagenumbers= page_numbers
-    show_first = 1 not in page_numbers
-    show_last =  paginator.num_pages not in page_numbers
-    model_name=model.__name__.lower()
-    category_list=CategoryDefault.objects.filter(parent=None,type=model_name)
-    template=model_name+'/'+model_name+'_list.html'
-    return render_to_response(template, locals(), context_instance = RequestContext(request))
+            return self.handle_list(*self.args, **self.kwargs)
+        
+    def handle_category_list(self):
+        raise NotImplementedError(self.handle_get)
+        
+    def handle_list(self,app,model_name):
+        generic_list=self.model.live.all()
+        self.category='all'
+        args_dict=pagination(self.request,generic_list)
+        args_dict.update(self.__dict__)
+        return render_to_response(self.app+"/"+self.model_name.lower()+"_list.html",args_dict, context_instance = RequestContext(self.request))
 
-def generic_detail(request,app,model_name,instance_slug=None):
-    model = get_model(app,model_name)
-    try:
-        generic_detail=model._default_manager.get(slug=instance_slug)
-    except:
-        raise Http404
-    category_list=CategoryDefault.objects.all()
-    current=app
-    template=model.__name__.lower()+'/'+model.__name__.lower()+'_detail.html'
-    return render_to_response(template, locals(), context_instance = RequestContext(request))
+class WrapperDetailView(WrapperView):
+    """
+    This class can be used by any class to show basic detail of an object on templates
+    This class can be overriden by any class to change the behavior
+    """
+    
+    def handle_request(self):
+        self.model = get_model(self.app,self.model_name)
+        self.template=self.app+"/"+self.model_name.lower()+"_detail.html"
+        return self.handle_get(*self.args, **self.kwargs)
+        
+    def handle_get(self,app,model_name,instance_slug):
+        self.generic_detail=self.model._default_manager.get(slug=instance_slug)
+        args_dict={}
+        args_dict.update(self.__dict__)
+        return render_to_response(self.template,self.__dict__, context_instance = RequestContext(self.request))
+    
 
+class GenericList(WrapperListingView):
+    
+    def handle_category_list(self,app,model_name,category):
+        generic_list=self.model.live.filter(category__slug=category).order_by('?')
+        args_dict=pagination(self.request,generic_list)
+        args_dict.update(self.__dict__)
+        return render_to_response(self.template, args_dict, context_instance = RequestContext(self.request))
+
+class GenericDetail(WrapperDetailView):
+    pass
+
+@login_required
 def submit_comment(request,app,model_name,slug):
         
     post_comment(request)
     
-    return generic_detail(request,app,model_name,slug)
+    return GenericDetail(request,app=app,model_name=model_name,instance_slug=slug)
     
 def refine_data(request):
     model = get_model(request.GET.get('app'),request.GET.get('model_name'))
