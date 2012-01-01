@@ -13,8 +13,9 @@ from django.contrib.auth.models import ContentType
 from django.http import Http404
 from voting.models import Vote
 from django.db.models import Count
+import urllib2,json
 
-class WrapperView(object):
+class WrapperView( object ):
     
     """
     This is a wrapper view that can be inherited by any class for creating
@@ -25,75 +26,146 @@ class WrapperView(object):
     handle_request() check if request is of type GET or POST and call appropriate handle
     """
     
-    def __new__(cls, request, *args, **kwargs):
-        self = object.__new__(cls)
+    def __new__( cls, request, *args, **kwargs ):
+        self = object.__new__( cls )
         self.args = args
         self.kwargs = kwargs
         self.request = request
-        self.current=kwargs['app']
-        self.limit=10
-        self.state='all'
-        self.app=kwargs['app']
-        self.model_name=kwargs['model_name']
-        self.__init__()
+        self.app = self.kwargs.get( 'app', None )
+        self.model_name = self.kwargs.get( 'model_name', None )
         return self.handle_request()
 
-    def __init__(self):
+    def __init__( self ):
         pass
 
-class WrapperListingView(WrapperView):
+class WrapperListingView( WrapperView ):
     """
     This class can be used by any class to show basic listing on templates
     This class can be overriden by any class to change the behavior(applying various filters)
     """
     
-    def handle_request(self):
-        self.template=self.app+"/"+self.model_name.lower()+"_list.html"
-        self.category_list=CategoryDefault._default_manager.filter(parent=None,type=self.model_name)
-        self.model = get_model(self.app,self.model_name)        
-        if self.kwargs.get('category'):
-            return self.handle_category_list(*self.args, **self.kwargs)
-        else:
-            return self.handle_list(*self.args, **self.kwargs)
+    def handle_request( self ):
+        self.template = self.app + "/listing.html"
+        self.model = get_model( self.app, self.model_name )        
+        self.get_data()
+        self.category = 'all'
+        self.extra_data()
+        self.search_data()
+        args_dict = pagination( self.request, self.generic_list )
+        args_dict.update( self.__dict__ )
+        return render_to_response( self.template, args_dict, context_instance = RequestContext( self.request ) )
+    
+    def get_data( self ):
+        order,self.order_type=self.request.GET.get('o','id'),'desc'
+        if self.request.GET.get('ot') and self.request.GET.get('ot') == 'desc':
+            order='-'+order
+            self.order_type='asc'
+        self.generic_list = self.model.objects.all().order_by(order)
         
-    def handle_category_list(self):
-        raise NotImplementedError(self.handle_get)
+    def search_data(self):
+        q=self.request.GET.get('q')
+        if q:
+            kwargs={str(self.request.GET.get('search_on'))+'__contains':self.request.GET.get('q')}
+            self.generic_list=self.generic_list.filter(**kwargs)
+            
         
-    def handle_list(self,app,model_name):
-        generic_list=self.model.live.all()
-        self.category='all'
-        args_dict=pagination(self.request,generic_list)
-        args_dict.update(self.__dict__)
-        return render_to_response(self.app+"/"+self.model_name.lower()+"_list.html",args_dict, context_instance = RequestContext(self.request))
+    def extra_data( self ):
+        pass
 
-class WrapperDetailView(WrapperView):
+class WrapperDetailView( WrapperView ):
     """
     This class can be used by any class to show basic detail of an object on templates
     This class can be overriden by any class to change the behavior
     """
     
-    def handle_request(self):
-        self.model = get_model(self.app,self.model_name)
-        self.template=self.app+"/"+self.model_name.lower()+"_detail.html"
-        return self.handle_get(*self.args, **self.kwargs)
+    def handle_request( self ):
+        self.model = get_model( self.app, self.model_name )
+        self.template = self.app + "/detail.html"
+        self.get_data()
+        self.extra_data()
+        args_dict = {}
+        args_dict.update( self.__dict__ )
+        return render_to_response( self.template, self.__dict__, context_instance = RequestContext( self.request ) )
         
-    def handle_get(self,app,model_name,instance_slug):
-        self.generic_detail=self.model._default_manager.get(slug=instance_slug)
-        args_dict={}
-        args_dict.update(self.__dict__)
-        return render_to_response(self.template,self.__dict__, context_instance = RequestContext(self.request))
+    def get_data( self ):
+        self.slug = self.kwargs.get( 'slug' )
+        self.generic_detail = self.model._default_manager.get( slug = self.slug )
+        
+    def extra_data( self ):
+        pass
     
 
-class GenericList(WrapperListingView):
+class SearchWrapperView( CoreWrapperView ):
+    """
+    This class can be used by any class to show basic listing on templates
+    This class can be overriden by any class to change the behavior(applying various filters)
+    """
     
-    def handle_category_list(self,app,model_name,category):
-        generic_list=self.model.live.filter(category__slug=category).order_by('?')
-        args_dict=pagination(self.request,generic_list)
-        args_dict.update(self.__dict__)
-        return render_to_response(self.template, args_dict, context_instance = RequestContext(self.request))
+    def add_facets( self, args_dict,location='' ):
+        if args_dict.get( 'sw' ):
+            args_dict['sw'] = stringprocessing( args_dict.get( 'sw' ), 'simple' )
+        for key, value in self.solrmapfields.items():
+            if args_dict.has_key( key ):
+                if args_dict.get( key ):
+                    if type( value ) == list:
+                        string = ''
+                        for i in range( 0, len( value ), 1 ):
+                            string = string + value[i] + ':(' + ' '.join( args_dict.getlist( key ) ) + ')'
+                            if i < len( value ) - 1:
+                                string = string + ' '
+                        self.facets.append( string )
+                    else:
+                        self.facets.append( value + ':(' + ' '.join( args_dict.getlist( key ) ) + ')' )
+        self.params['fq'] = self.facets
+        
+    def add_alphabet(self):
+    
+        self.alphabet_list=[]
+        for data in self.sqs:
+            if not self.alphabet_list.__contains__( data.slug[0] ):
+                self.alphabet_list.append( data.slug[0] )
+        self.alphabet_list.sort()
+                
+    def query( self ):
 
-class GenericDetail(WrapperDetailView):
-    pass
+        self.sqs = SearchQuerySet().raw_search( self.q, **self.params )
+
+    def add_params(self):
+        self.facets = []
+        self.params = {'display_flag':1, }
+        self.q,self.location='*:*',''
+        if self.request.GET.get('q'):
+            self.q=self.request.GET.get('q','*:*')
+        if self.request.GET.get('location'):
+            self.location=self.request.GET.get('location','')
+        if self.kwargs.get('q'):
+            self.q,self.location=self.kwargs.get('q','*:*'),self.kwargs.get('location','')
+            if self.location == 'all':
+                self.location=''
+            if self.q == 'all':
+                self.q='*:*'
+        weights = []
+        searchweights = SearchWeight.objects.all()
+        for record in searchweights:
+            weights.append( record.field + "^" + str( record.weight ) )
+        weights = " ".join( weights )
+        #self.params = {'facet':'on', 'qf':'text ' + weights,'facet.field':['{!ex=facet_field_name}facet_field_name_in_schema'], 'facet.mincount':1}
+        #self.solrmapfields = {'course_subcategory':'{!tag=course_subcategory}course_subcategory_exact','isaff':'affiliation'}
+        
+    def stringprocessing( arg ):
+        arg = arg.lower()
+        arg = arg.replace( ',', ' , ' )
+        arg = arg.replace( '"', ' " ' )
+        arg = arg.strip( ' ,' )
+        arg = re.sub( r'(\s)+', ' ', arg )
+        return ''.join( arg )
+    
+    def add_sorting( self ):
+        sort=self.request.GET.get('sort')
+        if sort:
+            self.params['sort'] = sort+' asc'
+            self.sort_order = sort
+            
 
 @login_required
 def submit_comment(request,app,model_name,slug):
@@ -188,3 +260,10 @@ def pagination(request,generic_list):
 def index(request):
     current='index'
     return render_to_response('index.html', locals(), context_instance = RequestContext(request))
+
+def get_tweets(q='technology'):
+        url='http://search.twitter.com/search.json?q='+q+'&rpp=5&include_entities=true&with_twitter_user_id=true&result_type=mixed'
+        opener = urllib2.build_opener()
+        result = opener.open(url).read()
+        jsonResult = json.loads(result)
+        return jsonResult
